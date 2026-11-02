@@ -173,8 +173,10 @@ const latestVersion = ref("");
 const updateNotes = ref("");
 const downloadProgress = ref(0);
 
-const GITHUB_RELEASE_API =
-  "https://api.github.com/repos/meet-fish-code/gugu-pdf-tools/releases/latest";
+// GitHub 更新配置文件地址
+const UPDATE_CONFIG_URL =
+  "https://raw.githubusercontent.com/meet-fish-code/gugu-pdf-tools/main/update.json";
+
 // 最新版本下载地址
 const latestDownloadUrl = ref("");
 
@@ -183,6 +185,15 @@ const latestReleaseUrl = ref("");
 
 // 获取当前应用版本
 const currentVersion = ref("");
+
+// 更新配置数据结构
+interface UpdateConfig {
+  version: string;
+  name?: string;
+  downloadUrl: string;
+  releaseUrl?: string;
+  notes?: string;
+}
 
 /** 更新弹窗标题 */
 const updateTitle = computed(() => {
@@ -211,7 +222,6 @@ const updateMessage = computed(() => {
       return "当前已经是最新版本，无需更新。";
   }
 });
-
 
 /**
  * 比较版本号
@@ -247,7 +257,8 @@ function compareVersion(current: string, latest: string): number {
 /**
  * 检查软件更新
  *
- * 从 GitHub Releases 获取最新正式发行版。
+ * 从 GitHub 仓库 update.json 获取最新版本信息。
+ * 不再调用 GitHub Releases API，避免 API 请求频率限制。
  */
 async function checkUpdate() {
   if (checkingUpdate.value) return;
@@ -258,61 +269,36 @@ async function checkUpdate() {
     // 获取当前安装版本
     currentVersion.value = await getVersion();
 
-    // 请求 GitHub 最新发行版
-    const response = await fetch(GITHUB_RELEASE_API, {
+    // 请求 GitHub 更新配置
+    const response = await fetch(UPDATE_CONFIG_URL, {
       method: "GET",
-      headers: {
-        Accept: "application/vnd.github+json",
-      },
       cache: "no-store",
       signal: AbortSignal.timeout(15000),
     });
 
     if (!response.ok) {
-      if (response.status === 403) {
-        const remaining = response.headers.get("x-ratelimit-remaining");
-
-        if (remaining === "0") {
-          const reset = response.headers.get("x-ratelimit-reset");
-          const resetTime = reset
-            ? new Date(Number(reset) * 1000).toLocaleTimeString()
-            : "";
-
-          throw new Error(
-            `GitHub 更新服务请求次数已达到限制，请${resetTime ? `在 ${resetTime} 后` : "稍后"}重试。`
-          );
-        }
-      }
-
-      throw new Error(`检查更新失败：HTTP ${response.status}`);
+      throw new Error(`获取更新配置失败：HTTP ${response.status}`);
     }
 
-    const release = await response.json();
+    const config = (await response.json()) as UpdateConfig;
 
-    // 获取最新版本号
-    if (!release.tag_name) {
-      throw new Error("GitHub Release 未提供版本标签");
+    // 校验更新配置
+    if (!config.version || !config.downloadUrl) {
+      throw new Error("更新配置不完整，请检查 update.json");
     }
 
-    const version = release.tag_name.replace(/^v/i, "");
+    // 获取最新版本信息
+    const version = config.version.replace(/^v/i, "");
 
     latestVersion.value = version;
     latestReleaseUrl.value =
-      release.html_url ||
+      config.releaseUrl ||
       "https://github.com/meet-fish-code/gugu-pdf-tools/releases";
 
+    latestDownloadUrl.value = config.downloadUrl;
+
     // 获取更新说明
-    updateNotes.value = release.body?.trim() || "暂无更新说明";
-
-    // 查找 Windows 安装程序
-    const installer = (release.assets || []).find(
-      (asset: { name: string }) =>
-        asset.name.toLowerCase().endsWith(".exe")
-    );
-
-    // 优先使用安装包下载地址，没有安装包则打开 Release 页面
-    latestDownloadUrl.value =
-      installer?.browser_download_url || latestReleaseUrl.value;
+    updateNotes.value = config.notes?.trim() || "暂无更新说明";
 
     // 比较版本
     const result = compareVersion(currentVersion.value, version);
@@ -332,7 +318,10 @@ async function checkUpdate() {
     console.error("检查更新失败：", error);
 
     updateStatus.value = "error";
-    updateNotes.value = "无法连接 GitHub 获取最新版本信息，请稍后重试。";
+    updateNotes.value =
+      error instanceof Error
+        ? error.message
+        : "无法获取最新版本信息，请稍后重试。";
 
     showUpdateDialog.value = true;
 
@@ -340,6 +329,7 @@ async function checkUpdate() {
     checkingUpdate.value = false;
   }
 }
+
 /**
  * 下载更新
  *
@@ -372,6 +362,7 @@ async function startUpdate() {
 }
 
 // #endregion
+
 
 // #region PDF 密码保护配置
 
