@@ -168,10 +168,21 @@ const autoCheckUpdate = ref(true);
 const checkingUpdate = ref(false);
 const showUpdateDialog = ref(false);
 
-const updateStatus = ref<"available" | "latest" | "downloading">("latest");
+const updateStatus = ref<"available" | "latest" | "downloading" | "error">("latest");
 const latestVersion = ref("");
 const updateNotes = ref("");
 const downloadProgress = ref(0);
+
+const GITHUB_RELEASE_API =
+  "https://api.github.com/repos/meet-fish-code/gugu-pdf-tools/releases/latest";
+// 最新版本下载地址
+const latestDownloadUrl = ref("");
+
+// 最新版本发行页面
+const latestReleaseUrl = ref("");
+
+// 获取当前应用版本
+const currentVersion = ref("");
 
 /** 更新弹窗标题 */
 const updateTitle = computed(() => {
@@ -180,6 +191,8 @@ const updateTitle = computed(() => {
       return "发现新版本";
     case "downloading":
       return "正在更新";
+    case "error":
+      return "检查更新失败";
     default:
       return "已经是最新版本";
   }
@@ -191,52 +204,170 @@ const updateMessage = computed(() => {
     case "available":
       return "发现新版本，建议更新以获得更好的使用体验。";
     case "downloading":
-      return "正在下载更新文件，请稍候...";
+      return "正在打开更新下载地址...";
+    case "error":
+      return "暂时无法获取更新信息，请检查网络连接后重试。";
     default:
       return "当前已经是最新版本，无需更新。";
   }
 });
 
+
+/**
+ * 比较版本号
+ *
+ * 返回：
+ *  1：当前版本大于最新版本
+ *  0：版本相同
+ * -1：当前版本小于最新版本
+ */
+function compareVersion(current: string, latest: string): number {
+  const parse = (version: string) =>
+    version
+      .replace(/^v/i, "")
+      .split(".")
+      .map((item) => Number(item) || 0);
+
+  const currentParts = parse(current);
+  const latestParts = parse(latest);
+
+  const length = Math.max(currentParts.length, latestParts.length);
+
+  for (let i = 0; i < length; i++) {
+    const currentPart = currentParts[i] || 0;
+    const latestPart = latestParts[i] || 0;
+
+    if (currentPart > latestPart) return 1;
+    if (currentPart < latestPart) return -1;
+  }
+
+  return 0;
+}
+
 /**
  * 检查软件更新
  *
- * 当前保留模拟逻辑，后续接入 Tauri Updater。
+ * 从 GitHub Releases 获取最新正式发行版。
  */
 async function checkUpdate() {
+  if (checkingUpdate.value) return;
+
   checkingUpdate.value = true;
 
   try {
-    console.log("后续接入 Tauri 更新检查逻辑");
+    // 获取当前安装版本
+    currentVersion.value = await getVersion();
 
-    await new Promise((resolve) => setTimeout(resolve, 800));
+    // 请求 GitHub 最新发行版
+    const response = await fetch(GITHUB_RELEASE_API, {
+      method: "GET",
+      headers: {
+        Accept: "application/vnd.github+json",
+      },
+      cache: "no-store",
+      signal: AbortSignal.timeout(15000),
+    });
 
-    updateStatus.value = "available";
-    latestVersion.value = "0.2.0";
-    updateNotes.value = `1. 优化 PDF 压缩功能
-2. 修复部分 PDF 转换异常
-3. 优化软件运行稳定性
-4. 改进用户界面体验`;
+    if (!response.ok) {
+      if (response.status === 403) {
+        const remaining = response.headers.get("x-ratelimit-remaining");
+
+        if (remaining === "0") {
+          const reset = response.headers.get("x-ratelimit-reset");
+          const resetTime = reset
+            ? new Date(Number(reset) * 1000).toLocaleTimeString()
+            : "";
+
+          throw new Error(
+            `GitHub 更新服务请求次数已达到限制，请${resetTime ? `在 ${resetTime} 后` : "稍后"}重试。`
+          );
+        }
+      }
+
+      throw new Error(`检查更新失败：HTTP ${response.status}`);
+    }
+
+    const release = await response.json();
+
+    // 获取最新版本号
+    if (!release.tag_name) {
+      throw new Error("GitHub Release 未提供版本标签");
+    }
+
+    const version = release.tag_name.replace(/^v/i, "");
+
+    latestVersion.value = version;
+    latestReleaseUrl.value =
+      release.html_url ||
+      "https://github.com/meet-fish-code/gugu-pdf-tools/releases";
+
+    // 获取更新说明
+    updateNotes.value = release.body?.trim() || "暂无更新说明";
+
+    // 查找 Windows 安装程序
+    const installer = (release.assets || []).find(
+      (asset: { name: string }) =>
+        asset.name.toLowerCase().endsWith(".exe")
+    );
+
+    // 优先使用安装包下载地址，没有安装包则打开 Release 页面
+    latestDownloadUrl.value =
+      installer?.browser_download_url || latestReleaseUrl.value;
+
+    // 比较版本
+    const result = compareVersion(currentVersion.value, version);
+
+    if (result < 0) {
+      // 发现新版本
+      updateStatus.value = "available";
+    } else {
+      // 当前版本已经是最新版本，或者本地版本更新
+      updateStatus.value = "latest";
+      updateNotes.value = "当前已经是最新版本，无需更新。";
+    }
 
     showUpdateDialog.value = true;
+
+  } catch (error) {
+    console.error("检查更新失败：", error);
+
+    updateStatus.value = "error";
+    updateNotes.value = "无法连接 GitHub 获取最新版本信息，请稍后重试。";
+
+    showUpdateDialog.value = true;
+
   } finally {
     checkingUpdate.value = false;
   }
 }
-
 /**
- * 下载并安装更新
+ * 下载更新
  *
- * 当前仅保留更新状态，尚未接入实际下载逻辑。
+ * 打开 GitHub 安装包下载地址，由浏览器负责下载。
+ * 当前不是 Tauri 自动更新，不执行静默安装。
  */
 async function startUpdate() {
+  if (!latestDownloadUrl.value) {
+    console.error("没有可用的更新下载地址");
+    return;
+  }
+
   try {
     updateStatus.value = "downloading";
-    downloadProgress.value = 0;
 
-    console.log("接入 Tauri Updater 下载和安装逻辑");
+    await openUrl(latestDownloadUrl.value);
+
+    // 浏览器已接管下载，关闭更新弹窗
+    showUpdateDialog.value = false;
+
+    // 恢复状态
+    updateStatus.value = "available";
+
   } catch (error) {
-    console.error("更新失败：", error);
-    updateStatus.value = "latest";
+    console.error("打开更新下载地址失败：", error);
+
+    updateStatus.value = "error";
+    updateNotes.value = "打开下载地址失败，请稍后重试。";
   }
 }
 
